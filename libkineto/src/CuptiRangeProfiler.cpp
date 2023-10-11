@@ -109,6 +109,7 @@ CuptiRangeProfilerSession::CuptiRangeProfilerSession(
     LOG(INFO) << "\t" << m;
   }
 
+#if (defined(_MSC_VER) && defined(_HAS_CXX20) && _HAS_CXX20) 
   CuptiRangeProfilerOptions opts{
     .metricNames = cupti_metrics,
     .deviceId = 0,
@@ -116,6 +117,11 @@ CuptiRangeProfilerSession::CuptiRangeProfilerSession(
     .numNestingLevels = 1,
     .cuContext = nullptr,
     .unitTest = false};
+#else
+  CuptiRangeProfilerOptions opts{
+    cupti_metrics, 0, max_ranges, 1, nullptr, false
+  };
+#endif
 
   for (auto device_id : CuptiRBProfilerSession::getActiveDevices()) {
     LOG(INFO) << "Init CUPTI range profiler on gpu = " << device_id
