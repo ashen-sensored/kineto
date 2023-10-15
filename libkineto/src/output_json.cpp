@@ -10,6 +10,7 @@
 
 #include <fmt/format.h>
 #include <fstream>
+#include <tuple>
 #include <time.h>
 #include <map>
 
@@ -35,9 +36,79 @@ static constexpr char kDefaultLogFileFmt[] =
 static constexpr char kDefaultLogFileFmt[] = "libkineto_activities_{}.json";
 #endif
 
+std::tuple<std::string, bool> fixInvalidUTF8(const std::string& input) {
+  std::string output;
+  output.reserve(input.length());
+  bool tainted = false;
+
+  for (auto it = input.begin(); it != input.end();) {
+    // Check if the current byte is a valid UTF-8 leading byte
+    unsigned char byte = static_cast<unsigned char>(*it);
+    int num_bytes = 0;
+
+    if ((byte & 0x80) == 0)
+      num_bytes = 1;
+    else if ((byte & 0xE0) == 0xC0)
+      num_bytes = 2;
+    else if ((byte & 0xF0) == 0xE0)
+      num_bytes = 3;
+    else if ((byte & 0xF8) == 0xF0)
+      num_bytes = 4;
+    else {
+      // Invalid leading byte, skipping it
+      tainted = true;
+      ++it;
+      continue;
+    }
+
+    // Check if there are enough bytes left in the input
+    if (std::distance(it, input.end()) < num_bytes) {
+      tainted = true;
+      break;
+    }
+
+    // Check if the following bytes are valid UTF-8 continuation bytes
+    bool invalid = false;
+    for (int i = 1; i < num_bytes; ++i) {
+      if ((*(it + i) & 0xC0) != 0x80) {
+        invalid = true;
+        tainted = true;
+        break;
+      }
+    }
+
+    if (invalid) {
+      // Invalid continuation bytes, skipping the leading byte
+      ++it;
+    } else {
+      // Valid UTF-8 sequence, append it to the output
+      output.append(it, it + num_bytes);
+      it += num_bytes;
+    }
+  }
+
+  return {output, tainted};
+}
+
 std::string& ChromeTraceLogger::sanitizeStrForJSON(std::string& value) {
-// Replace all backslashes with forward slash because Windows paths causing JSONDecodeError.
+  // Replace all backslashes with forward slash because Windows paths causing
+  // JSONDecodeError.
   std::replace(value.begin(), value.end(), '\\', '/');
+
+  // In rare cases(around 1 in 300,000), we observe trace names appended with
+  // invalid function names, with most of them happening at line 0.
+  // However, this is becoming a problem with a trace run
+  // containing 8,000,000 Evs, ideally should find the root cause.
+
+  auto [fixedValue, tainted] = fixInvalidUTF8(value);
+  if (tainted) {
+  
+    std::string::size_type pos = fixedValue.find("):");
+    if (pos != std::string::npos) {
+      std::string newvalue = fixedValue.substr(0, pos + 2) + " <module> ";
+        value = newvalue;
+    }
+  }
   return value;
 }
 
@@ -282,7 +353,7 @@ void ChromeTraceLogger::handleActivity(
     ts--;
     duration++; // Still need it to end at the orginal point
   }
-
+  
   std::string arg_values = "";
   if (op.correlationId() != 0) {
     arg_values.append(fmt::format("\"External id\": {}", op.correlationId()));
@@ -308,13 +379,14 @@ void ChromeTraceLogger::handleActivity(
   std::string op_name = op.name() == "kernel" ? "Kernel" : op.name();
 
   // clang-format off
-  traceOf_ << fmt::format(R"JSON(
+  std::string output_formatted = fmt::format(R"JSON(
   {{
     "ph": "X", "cat": "{}", "name": "{}", "pid": {}, "tid": {},
     "ts": {}, "dur": {}{}
   }},)JSON",
           toString(op.type()), sanitizeStrForJSON(op_name), device, resource,
           ts, duration, args);
+  traceOf_ << output_formatted;
   // clang-format on
   if (op.flowId() > 0) {
     handleGenericLink(op);
